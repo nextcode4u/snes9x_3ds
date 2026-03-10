@@ -49,6 +49,72 @@ static const DirectoryEntry* selectedEntry = nullptr;
 static std::vector<SMenuTab> menuTab;
 static std::vector<DirectoryEntry> entries;
 
+static bool readLaunchPathfile(const char* pathfile, char* outPath, size_t outSize)
+{
+    if (outPath == nullptr || outSize == 0) {
+        return false;
+    }
+
+    FILE* file = fopen(pathfile, "rb");
+    if (file == nullptr) {
+        return false;
+    }
+
+    size_t bytesRead = fread(outPath, 1, outSize - 1, file);
+    fclose(file);
+    outPath[bytesRead] = '\0';
+
+    while (bytesRead > 0) {
+        char c = outPath[bytesRead - 1];
+        if (c == '\n' || c == '\r' || c == '\t' || c == ' ') {
+            outPath[bytesRead - 1] = '\0';
+            --bytesRead;
+        } else {
+            break;
+        }
+    }
+
+    size_t start = 0;
+    while (outPath[start] == ' ' || outPath[start] == '\t' || outPath[start] == '\n' || outPath[start] == '\r') {
+        ++start;
+    }
+    if (start > 0) {
+        memmove(outPath, outPath + start, strlen(outPath + start) + 1);
+    }
+
+    return outPath[0] != '\0';
+}
+
+static bool setRomFromLaunchPath(const char* launchPath)
+{
+    if (!launchPath || launchPath[0] == '\0' || !IsFileExists(launchPath)) {
+        return false;
+    }
+
+    const char* slash = strrchr(launchPath, '/');
+    if (!slash || slash[1] == '\0') {
+        return false;
+    }
+
+    char filename[NAME_MAX + 1];
+    snprintf(filename, sizeof(filename), "%s", slash + 1);
+    if (!file3dsIsValidFilename(filename)) {
+        return false;
+    }
+
+    char directory[PATH_MAX];
+    size_t dirLen = static_cast<size_t>(slash - launchPath + 1);
+    if (dirLen >= sizeof(directory)) {
+        return false;
+    }
+    memcpy(directory, launchPath, dirLen);
+    directory[dirLen] = '\0';
+
+    file3dsSetCurrentDir(directory);
+    snprintf(romFileName, sizeof(romFileName), "%s", filename);
+    return true;
+}
+
 extern SCheatData Cheat;
 
 bool ResetHotkeyIfNecessary(int index, bool cpadBindingEnabled) {
@@ -1869,6 +1935,15 @@ int main()
     gfxSetDoubleBuffering(settings3DS.SecondScreen, true);
 
     GPU3DS.emulatorState = EMUSTATE_PAUSEMENU;
+
+    char launchPath[PATH_MAX];
+    if (readLaunchPathfile("sdmc:/pathfile/snes_launch.txt", launchPath, sizeof(launchPath)) &&
+        setRomFromLaunchPath(launchPath))
+    {
+        if (emulatorLoadRom()) {
+            GPU3DS.emulatorState = EMUSTATE_EMULATE;
+        }
+    }
     
     while (aptMainLoop() && GPU3DS.emulatorState != EMUSTATE_END) {
         switch (GPU3DS.emulatorState) {
