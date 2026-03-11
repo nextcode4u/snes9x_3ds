@@ -204,6 +204,12 @@ void snd3dsPlaySound(int chn, u32 flags, u32 sampleRate, float vol, float pan, v
 //---------------------------------------------------------
 void snd3dsStartPlaying()
 {
+    if (snd3DS.audioType != 1) {
+        // Audio backend unavailable in this launch context; keep emulation running silently.
+        snd3DS.generateSilence = true;
+        return;
+    }
+
     if (!snd3DS.isPlaying)
     {
         // CSND
@@ -268,16 +274,18 @@ bool snd3dsInitialize()
     ret = csndInit();
     log3dsWrite("Trying to initialize CSND, ret = %x", ret);
 
-	if (!R_FAILED(ret))
+    if (!R_FAILED(ret))
     {
         snd3DS.audioType = 1;
         log3dsWrite("CSND Initialized");
     }
     else
     {
-        log3dsWrite("Unable to initialize 3DS CSND service");
-
-        return false;
+        // Some launchers do not provide CSND reliably. Continue without audio
+        // instead of aborting startup.
+        log3dsWrite("Unable to initialize 3DS CSND service, continuing in silent mode");
+        snd3DS.generateSilence = true;
+        return true;
     }
 
     // Initialize the sound buffers

@@ -113,12 +113,14 @@ static AssetDrawContext getAssetDrawContext(SGPU_TEXTURE_ID textureId) {
 
 static void img3dsAllocVramTexture(const char *path, SGPU_TEXTURE_ID textureId) {
     FILE *file = fopen(path, "rb");
-    if (!file) return;
-
     SGPUTexture *texture = &GPU3DS.textures[textureId];
     int idx = textureId - UI_TEXTURE_START;
-    textureInfo[idx] = Tex3DS_TextureImportStdio(file, &texture->tex, NULL, true);
-    fclose(file);
+    textureInfo[idx] = nullptr;
+
+    if (file) {
+        textureInfo[idx] = Tex3DS_TextureImportStdio(file, &texture->tex, NULL, true);
+        fclose(file);
+    }
 
     if (textureInfo[idx]) {
         texture->id = textureId;
@@ -150,6 +152,27 @@ static void img3dsAllocVramTexture(const char *path, SGPU_TEXTURE_ID textureId) 
         defaultAssets[idx].dim.width = subTex->width;
         defaultAssets[idx].dim.height = subTex->height;
         defaultAssets[idx].path[0] = '\0'; // no PNG path for internal t3x
+        return;
+    }
+
+    // Fallback for launchers that do not expose romfs assets.
+    // Allocate a tiny transparent texture so UI init can proceed.
+    const int fallbackSize = 8;
+    if (C3D_TexInitVRAM(&texture->tex, fallbackSize, fallbackSize, GPU_RGBA8)) {
+        texture->id = textureId;
+        C3D_TexSetFilter(&texture->tex, GPU_LINEAR, GPU_LINEAR);
+        texture->scale[3] = 1.0f / texture->tex.width;
+        texture->scale[2] = 1.0f / texture->tex.height;
+        texture->scale[1] = 0;
+        texture->scale[0] = 0;
+
+        defaultAssets[idx].tex = texture->tex;
+        defaultAssets[idx].active = false;
+        defaultAssets[idx].dim.width = fallbackSize;
+        defaultAssets[idx].dim.height = fallbackSize;
+        defaultAssets[idx].path[0] = '\0';
+
+        log3dsWrite("[img3ds] Missing romfs asset, using fallback texture: %s", path);
     }
 }
 
@@ -250,16 +273,25 @@ static bool img3dsLoadPngToAsset(UiAsset* asset, int textureIdx, const char* pat
         return false;
     }
 
-    const Tex3DS_SubTexture* subTex = Tex3DS_GetSubTexture(textureInfo[textureIdx], 0);
-    if (!width || !height || width > subTex->width || height > subTex->height) {
-        log3dsWrite("[img3ds] Invalid dimensions for %s (%dx%d has to be < %dx%d)", path, width, height, subTex->width, subTex->height);
+    int maxWidth = tex->width;
+    int maxHeight = tex->height;
+    int tx = 0;
+    int ty = 0;
+
+    if (textureInfo[textureIdx]) {
+        const Tex3DS_SubTexture* subTex = Tex3DS_GetSubTexture(textureInfo[textureIdx], 0);
+        maxWidth = subTex->width;
+        maxHeight = subTex->height;
+        tx = (int)(subTex->left * tex->width);
+        ty = (int)((1.0f - subTex->top) * tex->height);
+    }
+
+    if (!width || !height || width > maxWidth || height > maxHeight) {
+        log3dsWrite("[img3ds] Invalid dimensions for %s (%dx%d has to be < %dx%d)", path, width, height, maxWidth, maxHeight);
         return false;
     }
 
     memset(g_texUploadBuffer, 0, tex->size);
-
-    int tx = (int)(subTex->left * tex->width);
-    int ty = (int)((1.0f - subTex->top) * tex->height); 
     u32* src = (u32*)g_fileBuffer;
 
     if (transferFormat == GX_TRANSFER_FMT_RGB565) {
@@ -404,6 +436,10 @@ void img3dsSplashAddVerticalShadow(int x0, int width, int color1, int color2) {
 static void img3dsDrawSplashEye(SGPU_TEXTURE_ID textureId, const Tex3DS_Texture info,
     int parallax, float *bg1_y, float *bg2_y)
 {
+    if (!info) {
+        return;
+    }
+
     u32 bg1_tint = 0x00000077;
     u32 bg2_tint = 0x00000099;
 
@@ -438,7 +474,14 @@ static void img3dsDrawSplashEye(SGPU_TEXTURE_ID textureId, const Tex3DS_Texture 
 
 void img3dsDrawSplash(SGPU_TEXTURE_ID textureId, float iod, bool isTopStereo, float *bg1_y, float *bg2_y) {
     const Tex3DS_Texture info = textureInfo[textureId - UI_TEXTURE_START];
+    if (!info) {
+        return;
+    }
+
     const Tex3DS_SubTexture* left = Tex3DS_GetSubTexture(info, 0);
+    if (!left) {
+        return;
+    }
 
     if (*bg2_y <= -left->height) {
         *bg2_y = 0;
@@ -461,6 +504,10 @@ void img3dsDrawSplash(SGPU_TEXTURE_ID textureId, float iod, bool isTopStereo, fl
 
 bool img3dsDrawAsset(SGPU_TEXTURE_ID textureId, const AssetDrawContext& ctx, float scaleX, float scaleY, bool forceAlphaBlending, int xOffset) {
     int idx = textureId - UI_TEXTURE_START;
+    if (idx < 0 || idx >= UI_TEX_COUNT - 1 || !textureInfo[idx]) {
+        return false;
+    }
+
     bool assetIsInactive = ctx.displayMode == Setting::AssetMode::None
         || (ctx.displayMode == Setting::AssetMode::CustomOnly && !externalAssets[idx].active);
 
@@ -489,7 +536,11 @@ bool img3dsDrawAsset(SGPU_TEXTURE_ID textureId, const AssetDrawContext& ctx, flo
         GPU3DS.currentRenderState.alphaBlending = ALPHA_BLENDING_ENABLED;
     }
 
-    img3dsDrawSubTexture(textureId, Tex3DS_GetSubTexture(textureInfo[idx], 0), sx0, sy0, width, height, overlayColor, scaleX, scaleY);
+    const Tex3DS_SubTexture* sub = Tex3DS_GetSubTexture(textureInfo[idx], 0);
+    if (!sub) {
+        return false;
+    }
+    img3dsDrawSubTexture(textureId, sub, sx0, sy0, width, height, overlayColor, scaleX, scaleY);
 
     return true;
 }

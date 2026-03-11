@@ -87,11 +87,41 @@ static bool readLaunchPathfile(const char* pathfile, char* outPath, size_t outSi
 
 static bool setRomFromLaunchPath(const char* launchPath)
 {
-    if (!launchPath || launchPath[0] == '\0' || !IsFileExists(launchPath)) {
+    if (!launchPath || launchPath[0] == '\0') {
         return false;
     }
 
-    const char* slash = strrchr(launchPath, '/');
+    char normalized[PATH_MAX];
+    snprintf(normalized, sizeof(normalized), "%s", launchPath);
+
+    // Accept paths written with quotes/backslashes by frontends.
+    size_t len = strlen(normalized);
+    if (len >= 2 && normalized[0] == '"' && normalized[len - 1] == '"') {
+        normalized[len - 1] = '\0';
+        memmove(normalized, normalized + 1, len - 1);
+    }
+    for (char* p = normalized; *p; ++p) {
+        if (*p == '\\') {
+            *p = '/';
+        }
+    }
+
+    // Accept sd:/ and /... forms.
+    if (strncmp(normalized, "sd:/", 4) == 0) {
+        char fixed[PATH_MAX];
+        snprintf(fixed, sizeof(fixed), "sdmc:/%s", normalized + 4);
+        snprintf(normalized, sizeof(normalized), "%s", fixed);
+    } else if (normalized[0] == '/') {
+        char fixed[PATH_MAX];
+        snprintf(fixed, sizeof(fixed), "sdmc:%s", normalized);
+        snprintf(normalized, sizeof(normalized), "%s", fixed);
+    }
+
+    if (!IsFileExists(normalized)) {
+        return false;
+    }
+
+    const char* slash = strrchr(normalized, '/');
     if (!slash || slash[1] == '\0') {
         return false;
     }
@@ -103,11 +133,11 @@ static bool setRomFromLaunchPath(const char* launchPath)
     }
 
     char directory[PATH_MAX];
-    size_t dirLen = static_cast<size_t>(slash - launchPath + 1);
+    size_t dirLen = static_cast<size_t>(slash - normalized + 1);
     if (dirLen >= sizeof(directory)) {
         return false;
     }
-    memcpy(directory, launchPath, dirLen);
+    memcpy(directory, normalized, dirLen);
     directory[dirLen] = '\0';
 
     file3dsSetCurrentDir(directory);
@@ -1704,13 +1734,41 @@ bool emulatorInitialize()
         file3dsSetRomNameMappings("romfs:/mappings.txt");
     }
 
-    if (!file3dsInitialize()) return false;
-    if (!gpu3dsInitialize()) return false;
-    if (!ui3dsInitialize()) return false;
-    if (!notif3dsInitialize()) return false;
-    if (!impl3dsInitialize()) return false;
-    if (!img3dsInitialize()) return false;
-    if (!snd3dsInitialize()) return false;
+    log3dsWrite("[boot] init file3ds");
+    if (!file3dsInitialize()) {
+        log3dsWrite("[boot] file3dsInitialize failed");
+        return false;
+    }
+    log3dsWrite("[boot] init gpu3ds");
+    if (!gpu3dsInitialize()) {
+        log3dsWrite("[boot] gpu3dsInitialize failed");
+        return false;
+    }
+    log3dsWrite("[boot] init ui3ds");
+    if (!ui3dsInitialize()) {
+        log3dsWrite("[boot] ui3dsInitialize failed");
+        return false;
+    }
+    log3dsWrite("[boot] init notif3ds");
+    if (!notif3dsInitialize()) {
+        log3dsWrite("[boot] notif3dsInitialize failed");
+        return false;
+    }
+    log3dsWrite("[boot] init impl3ds");
+    if (!impl3dsInitialize()) {
+        log3dsWrite("[boot] impl3dsInitialize failed");
+        return false;
+    }
+    log3dsWrite("[boot] init img3ds");
+    if (!img3dsInitialize()) {
+        log3dsWrite("[boot] img3dsInitialize failed");
+        return false;
+    }
+    log3dsWrite("[boot] init snd3ds");
+    if (!snd3dsInitialize()) {
+        log3dsWrite("[boot] snd3dsInitialize failed");
+        return false;
+    }
 
     enableAptHooks();
 
@@ -1927,22 +1985,45 @@ int main()
     cfgFileAvailable[0] = settingsReadWriteFullListGlobal(false);
     settings3dsUpdate(false);
 
+    log3dsWrite("[boot] entering emulatorInitialize");
     if (!emulatorInitialize()) {
+        log3dsWrite("[boot] emulatorInitialize returned false");
         return emulatorFinalize();
     }
+    log3dsWrite("[boot] emulatorInitialize succeeded");
     
     img3dsSetThumbMode();
     gfxSetDoubleBuffering(settings3DS.SecondScreen, true);
 
     GPU3DS.emulatorState = EMUSTATE_PAUSEMENU;
 
+    bool launchedFromPathfile = false;
     char launchPath[PATH_MAX];
     if (readLaunchPathfile("sdmc:/pathfile/snes_launch.txt", launchPath, sizeof(launchPath)) &&
         setRomFromLaunchPath(launchPath))
     {
+        log3dsWrite("[pathfile] launch file found and parsed: %s", launchPath);
         if (emulatorLoadRom()) {
+            log3dsWrite("[pathfile] emulatorLoadRom succeeded");
+            // Match the normal file-browser launch preparation path.
+            input3dsWaitForRelease();
+            menu3dsSetLastSelectedTabIndex(0);
+            log3dsWrite("[pathfile] impl3dsUpdateUiAssets begin");
+            impl3dsUpdateUiAssets();
+            log3dsWrite("[pathfile] impl3dsUpdateUiAssets end");
             GPU3DS.emulatorState = EMUSTATE_EMULATE;
+            launchedFromPathfile = true;
+        } else {
+            log3dsWrite("Pathfile ROM load failed, falling back to menu: %s", launchPath);
         }
+    } else {
+        log3dsWrite("[pathfile] no valid launch path, starting in menu");
+    }
+
+    if (!launchedFromPathfile) {
+        // Prevent immediate accidental exit when launched from a frontend
+        // while keys are still pressed.
+        input3dsWaitForRelease();
     }
     
     while (aptMainLoop() && GPU3DS.emulatorState != EMUSTATE_END) {
